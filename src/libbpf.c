@@ -5278,7 +5278,7 @@ bpf_object__create_maps(struct bpf_object *obj)
 
 		retried = false;
 retry:
-		if (map->pin_path) {
+		if (map->pin_path && !bpf_map__is_internal(map)) {
 			err = bpf_object__reuse_map(map);
 			if (err) {
 				pr_warn("map '%s': error reusing pinned map\n",
@@ -5321,7 +5321,7 @@ retry:
 			}
 		}
 
-		if (map->pin_path && !map->pinned) {
+		if (map->pin_path && !map->pinned && !bpf_map__is_internal(map)) {
 			err = bpf_map__pin(map, NULL);
 			if (err) {
 				zclose(map->fd);
