@@ -42,8 +42,11 @@ PATH_MAP=(									\
 	[tools/include/uapi/linux/bpf_common.h]=include/uapi/linux/bpf_common.h	\
 	[tools/include/uapi/linux/bpf.h]=include/uapi/linux/bpf.h		\
 	[tools/include/uapi/linux/btf.h]=include/uapi/linux/btf.h		\
+	[tools/include/uapi/linux/fcntl.h]=include/uapi/linux/fcntl.h		\
+	[tools/include/uapi/linux/openat2.h]=include/uapi/linux/openat2.h	\
 	[tools/include/uapi/linux/if_link.h]=include/uapi/linux/if_link.h	\
 	[tools/include/uapi/linux/if_xdp.h]=include/uapi/linux/if_xdp.h		\
+	[tools/include/uapi/linux/netdev.h]=include/uapi/linux/netdev.h		\
 	[tools/include/uapi/linux/netlink.h]=include/uapi/linux/netlink.h	\
 	[tools/include/uapi/linux/pkt_cls.h]=include/uapi/linux/pkt_cls.h	\
 	[tools/include/uapi/linux/pkt_sched.h]=include/uapi/linux/pkt_sched.h	\
@@ -51,8 +54,8 @@ PATH_MAP=(									\
 	[Documentation/bpf/libbpf]=docs						\
 )
 
-LIBBPF_PATHS="${!PATH_MAP[@]} :^tools/lib/bpf/Makefile :^tools/lib/bpf/Build :^tools/lib/bpf/.gitignore :^tools/include/tools/libc_compat.h"
-LIBBPF_VIEW_PATHS="${PATH_MAP[@]}"
+LIBBPF_PATHS=("${!PATH_MAP[@]}" ":^tools/lib/bpf/Makefile" ":^tools/lib/bpf/Build" ":^tools/lib/bpf/.gitignore" ":^tools/include/tools/libc_compat.h")
+LIBBPF_VIEW_PATHS=("${PATH_MAP[@]}")
 LIBBPF_VIEW_EXCLUDE_REGEX='^src/(Makefile|Build|test_libbpf\.c|bpf_helper_defs\.h|\.gitignore)$|^docs/(\.gitignore|api\.rst|conf\.py)$|^docs/sphinx/.*'
 LINUX_VIEW_EXCLUDE_REGEX='^include/tools/libc_compat.h$'
 
@@ -85,7 +88,9 @@ commit_desc()
 # $2 - paths filter
 commit_signature()
 {
-	git show --pretty='("%s")|%aI|%b' --shortstat $1 -- ${2-.} | tr '\n' '|'
+	local ref=$1
+	shift
+	git show --pretty='("%s")|%aI|%b' --shortstat $ref -- "${@-.}" | tr '\n' '|'
 }
 
 # Cherry-pick commits touching libbpf-related files
@@ -104,7 +109,7 @@ cherry_pick_commits()
 	local libbpf_conflict_cnt
 	local desc
 
-	new_commits=$(git rev-list --no-merges --topo-order --reverse ${baseline_tag}..${tip_tag} ${LIBBPF_PATHS[@]})
+	new_commits=$(git rev-list --no-merges --topo-order --reverse ${baseline_tag}..${tip_tag} -- "${LIBBPF_PATHS[@]}")
 	for new_commit in ${new_commits}; do
 		desc="$(commit_desc ${new_commit})"
 		signature="$(commit_signature ${new_commit} "${LIBBPF_PATHS[@]}")"
@@ -138,7 +143,7 @@ cherry_pick_commits()
 		echo "Picking '${desc}'..."
 		if ! git cherry-pick ${new_commit} &>/dev/null; then
 			echo "Warning! Cherry-picking '${desc} failed, checking if it's non-libbpf files causing problems..."
-			libbpf_conflict_cnt=$(git diff --name-only --diff-filter=U -- ${LIBBPF_PATHS[@]} | wc -l)
+			libbpf_conflict_cnt=$(git diff --name-only --diff-filter=U -- "${LIBBPF_PATHS[@]}" | wc -l)
 			conflict_cnt=$(git diff --name-only | wc -l)
 			prompt_resolution=1
 
@@ -257,7 +262,7 @@ if ((${COMMIT_CNT} <= 0)); then
 fi
 
 # Exclude baseline commit and generate nice cover letter with summary
-git format-patch ${SQUASH_BASE_TAG}..${SQUASH_TIP_TAG} --cover-letter -o ${TMP_DIR}/patches
+git format-patch --no-signature ${SQUASH_BASE_TAG}..${SQUASH_TIP_TAG} --cover-letter -o ${TMP_DIR}/patches
 
 # Now is time to re-apply libbpf-related linux patches to libbpf repo
 cd_to ${LIBBPF_REPO}
@@ -284,10 +289,26 @@ cd_to ${LIBBPF_REPO}
 helpers_changes=$(git status --porcelain src/bpf_helper_defs.h | wc -l)
 if ((${helpers_changes} == 1)); then
 	git add src/bpf_helper_defs.h
-	git commit -m "sync: auto-generate latest BPF helpers
+	git commit -s -m "sync: auto-generate latest BPF helpers
 
 Latest changes to BPF helper definitions.
 " -- src/bpf_helper_defs.h
+fi
+
+echo "Regenerating .mailmap..."
+cd_to "${LINUX_REPO}"
+git checkout "${TIP_SYM_REF}"
+cd_to "${LIBBPF_REPO}"
+"${LIBBPF_REPO}"/scripts/mailmap-update.sh "${LIBBPF_REPO}" "${LINUX_REPO}"
+# if anything changed, commit it
+mailmap_changes=$(git status --porcelain .mailmap | wc -l)
+if ((${mailmap_changes} == 1)); then
+	git add .mailmap
+	git commit -s -m "sync: update .mailmap
+
+Update .mailmap based on libbpf's list of contributors and on the latest
+.mailmap version in the upstream repository.
+" -- .mailmap
 fi
 
 # Use generated cover-letter as a template for "sync commit" with
@@ -306,7 +327,7 @@ Baseline bpf-next commit:   ${BASELINE_COMMIT}\n\
 Checkpoint bpf-next commit: ${TIP_COMMIT}\n\
 Baseline bpf commit:        ${BPF_BASELINE_COMMIT}\n\
 Checkpoint bpf commit:      ${BPF_TIP_COMMIT}/" |				      \
-git commit --file=-
+git commit -s --file=-
 
 echo "SUCCESS! ${COMMIT_CNT} commits synced."
 
@@ -316,10 +337,10 @@ cd_to ${LINUX_REPO}
 git checkout -b ${VIEW_TAG} ${TIP_COMMIT}
 FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --tree-filter "${LIBBPF_TREE_FILTER}" ${VIEW_TAG}^..${VIEW_TAG}
 FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --subdirectory-filter __libbpf ${VIEW_TAG}^..${VIEW_TAG}
-git ls-files -- ${LIBBPF_VIEW_PATHS[@]} | grep -v -E "${LINUX_VIEW_EXCLUDE_REGEX}" > ${TMP_DIR}/linux-view.ls
+git ls-files -- "${LIBBPF_VIEW_PATHS[@]}" | grep -v -E "${LINUX_VIEW_EXCLUDE_REGEX}" > ${TMP_DIR}/linux-view.ls
 
 cd_to ${LIBBPF_REPO}
-git ls-files -- ${LIBBPF_VIEW_PATHS[@]} | grep -v -E "${LIBBPF_VIEW_EXCLUDE_REGEX}" > ${TMP_DIR}/github-view.ls
+git ls-files -- "${LIBBPF_VIEW_PATHS[@]}" | grep -v -E "${LIBBPF_VIEW_EXCLUDE_REGEX}" > ${TMP_DIR}/github-view.ls
 
 echo "Comparing list of files..."
 diff -u ${TMP_DIR}/linux-view.ls ${TMP_DIR}/github-view.ls
